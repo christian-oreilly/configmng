@@ -1,0 +1,15 @@
+
+type: map
+mapping:
+  level1:
+    required: True
+    type: map
+    mapping:
+      level2a:
+        type: seq
+        sequence:
+          - type: str
+      level2b:
+        type: seq
+        sequence:
+          - type: str

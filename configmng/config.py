@@ -1,11 +1,16 @@
-import yaml
 from pathlib import Path
 from collections.abc import MutableMapping
 from tempfile import NamedTemporaryFile
 from warnings import warn
 from pykwalify.core import Core
 from pykwalify.errors import SchemaError
+import typing
+from typing import List
+import os
 import json
+import re
+
+import yaml
 try:
     from yaml import CLoader as Loader, CDumper as Dumper
 except ImportError:
@@ -13,35 +18,106 @@ except ImportError:
 
 from .schema import Schema
 from .utils import ConfigMngLoader, update, get_node
+#from .provenance import ConfigProv
+
+
+def check_regex_key(map, key):
+    if key in map:
+        return map[key]
+
+    for map_key in map:
+        if "regex" in map_key:
+            regex = map_key.split(";")[1]
+            pattern = re.compile(regex)
+            if pattern.match(key):
+                return map[map_key]
+
+    raise TypeError
+
+
 
 def get_schema_node(schema, path, key):
     obj_to_return = schema
     for level in path:
         if "mapping" in obj_to_return:
-            obj_to_return = obj_to_return["mapping"][level]
+            obj_to_return = check_regex_key(obj_to_return["mapping"], level)
         else:
             raise NotImplementedError
     if "mapping" in obj_to_return:
-        return obj_to_return["mapping"][key]
+        return check_regex_key(obj_to_return["mapping"], key)
     raise NotImplementedError
+
+
+def get_schema_key_type(schema, key, path):
+    return get_schema_node(schema,  path.split("/")[1:], key)["type"]
 
 
 class Config(MutableMapping):
 
     def __init__(self, config=None, schemas=None, temp_dir_node=("paths", "log_dir"),
-                 delete_tmp_files=False):
-        self.store = dict()
-        self._path = None
+                 delete_tmp_files=False, insertion_node=None):
+        self.store: dict = dict()
         self.temp_dir_node = temp_dir_node
         self.delete_tmp_files = delete_tmp_files
+        self.path = None
         self._tmp_file = None
-        self._schemas = []
+        self._schemas: List[Schema] = []
+        self._insertion_node = ()
+        self._provenance = Provenance()
 
         if schemas is not None:
             self.set_schemas(schemas)
         if config is not None:
             self.set_config(config, validate=False)
+        if insertion_node is not None:
+            self._insertion_node = insertion_node
+
         self.validate()
+
+    def __del__(self):
+        if self.delete_tmp_files and self._tmp_file is not None:
+            os.remove(self._tmp_file.name)
+
+    def __iadd__(self, other):
+        merged_config = self._merge_configs_([self, other])
+        self.store = merged_config.store
+        self._schemas = merged_config.schemas
+        self._insertion_node = merged_config._insertion_node
+        return self
+
+    def __add__(self, other):
+        return self._merge_configs_([self, other])
+
+    @property
+    def insertion_node(self):
+        return self._insertion_node
+
+    @insertion_node.setter
+    def insertion_node(self, insertion_node):
+        self._insertion_node = insertion_node
+
+    @staticmethod
+    def _merge_configs_(configs):
+        return_config = Config()
+        for config in configs:
+            store = return_config
+            if len(config.insertion_node):
+                for key in config.insertion_node[:-1]:
+                    if key not in store or store[key] is None:
+                        store[key] = {}
+                    store = store[key]
+                key = config.insertion_node[-1]
+
+                if key not in store:
+                    store[key] = {}
+                if isinstance(store[key], MutableMapping):
+                    update(store[key], config)
+                else:
+                    store[key] = config.store.copy()
+            else:
+                update(store, config.store.copy())
+            return_config.add_schemas(config.schemas)
+        return return_config
 
     def add_schemas(self, schemas):
         def _check_schema_type_(schema_to_check):
@@ -53,9 +129,13 @@ class Config(MutableMapping):
 
         if isinstance(schemas, list):
             for schema in schemas:
-                self._schemas.append(_check_schema_type_(schema))
+                schema = _check_schema_type_(schema)
+                if schema not in self._schemas:
+                    self._schemas.append(schema)
         else:
-            self._schemas.append(_check_schema_type_(schemas))
+            schema = _check_schema_type_(schemas)
+            if schema not in self._schemas:
+                self._schemas.append(schema)
 
     def set_schemas(self, schemas):
         self._schemas = []
@@ -76,6 +156,7 @@ class Config(MutableMapping):
             self.delete_tmp_files = config.delete_tmp_files
             self._tmp_file = config._tmp_file
             self._schemas = config.schemas
+            self._insertion_node = config._insertion_node
 
         elif isinstance(config, dict):
             self.path = None
@@ -90,7 +171,7 @@ class Config(MutableMapping):
         self.update(config, validate=validate)
 
     @property
-    def path(self):
+    def path(self) -> Path:
         return self._path
 
     def get_temporary_path(self):
@@ -113,12 +194,11 @@ class Config(MutableMapping):
                      .format(self.store["paths"]["log_dir"]))
                 dir_ = None
 
-        self._tmp_file = NamedTemporaryFile(mode='w+b', delete=self.delete_tmp_files,
-                                            prefix=".tmp_conf_", dir=dir_, suffix=".yaml")
+        self._tmp_file = NamedTemporaryFile(mode='w+b', prefix=".tmp_conf_", dir=dir_, suffix=".yaml")
         return Path(self._tmp_file.name)
 
     @path.setter
-    def path(self, path):
+    def path(self, path: Path):
         if path is None:
             self._path = self.get_temporary_path()
         elif isinstance(path, str):
@@ -138,14 +218,20 @@ class Config(MutableMapping):
     def schemas(self, schemas):
         self._schemas = schemas
 
-    def validate(self, raise_exception=True, interactive=False):
+    def validate(self, raise_exception=True, interactive=True):
         if len(self.schemas):
-            schema_files = [str(schema.path) for schema in self.schemas]
+            if not self.path.exists():
+                self.save()
 
+            # kwalify supports using many schemas, where one is the main schema
+            # and the other are partial schemas inserted in the main one. This
+            # is not our use case; we have union of complete schema. Therefore,
+            # we first merge ourselves our schemas.
+            schema = Schema.merge_schemas(self.schemas)
             try:
                 core = Core(source_file=str(self.path),
-                            schema_files=schema_files,
-                            source_data={})
+                            source_data={},
+                            schema_file_obj=schema.schema_io)
                 core.validate(raise_exception=raise_exception)
             except SchemaError:
                 if interactive:
@@ -153,19 +239,40 @@ class Config(MutableMapping):
                         self.manage_error(core, error)
                     self.validate(raise_exception, interactive)
                 else:
+                    print("An error has been raised while validating the configuration "
+                          "against the schema. This exception is raised because the "
+                          "interactive flag is set to False. To be asked interactively "
+                          "to fill the values that are missing or incompatible with "
+                          "the schema, use interactive=True. This should not be done "
+                          "for the application level however. At this level, the schema "
+                          "or the default configuration files should be corrected. " +
+                          "Faulty config file: {}".format(self.path))
+                    print("Config file {}:".format(str(self.path)))
+                    with self.path.open("r") as f:
+                        print(f.read())
+                    print("Schema files:")
+                    for schema in self.schemas:
+                        with schema.path.open("r") as f:
+                            print(f.read())
                     raise
+            except:
+                print("Unmanaged error while validating a configuration file. Faulty config file: {}".format(self.path))
+                print("Config file {}:".format(str(self.path)))
+                with self.path.open("r") as f:
+                    print(f.read())
+                print("Schema files:")
+                for schema in self.schemas:
+                    with schema.path.open("r") as f:
+                        print(f.read())
+                raise
 
     def set_value_at_path(self, value, key, path):
-        get_node(self.store, path.split("/")[1:])[key]  = value
-
-    def get_schema_key_type(self, schema, key, path):
-        return get_schema_node(schema,  path.split("/")[1:], key)["type"]
+        get_node(self.store, path.split("/")[1:])[key] = value
 
     def manage_error(self, core, error: SchemaError.SchemaErrorEntry):
 
         if "Cannot find required key" in error.msg:
-
-            if self.get_schema_key_type(core.schema, error.key, error.path) == "map":
+            if get_schema_key_type(core.schema, error.key, error.path) == "map":
                 value = {}
             else:
                 value = input("The key {} at path {} of the ".format(error.key, error.path) +
@@ -193,10 +300,15 @@ class Config(MutableMapping):
             raise
         self.save()
 
-
-
     def __getitem__(self, key):
-        return self.store[key]
+        try:
+            return self.store[key]
+        except KeyError:
+            err_msg = "Key '{}' not found in this configuration.\n".format(key)
+            # err_msg += "Configuration:\n {}\n".format(self.pretty_config())
+            # err_msg += "Schemas:\n {}".format(self.schemas)
+            print(err_msg)
+            raise
 
     def __setitem__(self, key, value):
         self.store[key] = value
@@ -220,12 +332,15 @@ class Config(MutableMapping):
         return json.dumps(self.to_json(), indent=4, sort_keys=True)
 
     def to_json(self):
-        return {"config_path": self._path,
-                "schema_paths": [schema.path for schema in self._schemas],
+        return {"config_path": str(self._path),
+                "schema_paths": [str(schema.path) for schema in self._schemas],
                 "config_dict": self.store}
 
+    def pretty_config(self):
+        return yaml.dump(self.store, default_flow_style=False, default_style='')
+
     def pretty_print(self):
-        print(yaml.dump(self.store, default_flow_style=False, default_style=''))
+        print(self.pretty_config())
 
     def update(self, *args, validate=True, **kwargs):
         if not args:
@@ -246,3 +361,7 @@ class Config(MutableMapping):
 
         with self.path.open("w") as stream:
             yaml.dump(self.store, stream, Dumper=Dumper)
+
+
+ScalarConfigArg = typing.TypeVar('ScalarConfigArg', MutableMapping, str, Path, Config)
+ConfigArg = typing.Union[ScalarConfigArg, typing.Iterable[ScalarConfigArg]]

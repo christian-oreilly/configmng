@@ -1,4 +1,7 @@
 from collections.abc import Mapping
+from copy import deepcopy
+
+import yaml
 try:
     from yaml import CLoader as Loader, CDumper as Dumper
 except ImportError:
@@ -13,6 +16,7 @@ def yn_choice(message, default='y'):
         raise RuntimeError("Execution aborted by the user.")
     return choice.strip().lower() in values
 
+
 def get_node(dict_obj, path):
     obj_to_return = dict_obj
     for level in path:
@@ -24,19 +28,48 @@ def get_node(dict_obj, path):
 # cause dict within dict to be simply overwritten rather than merged
 def update(d, u):
     for k, v in u.items():
-        dv = d.get(k, {})
-        if not isinstance(dv, Mapping) and not hasattr(dv, "keys"):
-            d[k] = v
-        elif isinstance(v, Mapping) or hasattr(v, "keys"):
-            d[k] = update(dv, v)
+        if k not in d:
+            if isinstance(v, Mapping) or hasattr(v, "keys"):
+                if isinstance(v, Mapping):
+                    d[k] = deepcopy(v)
+                else:
+                    d[k] = v
+            else:
+                d[k] = v
         else:
-            d[k] = v
+            dv = d.get(k, {})
+            if not isinstance(dv, Mapping) and not hasattr(dv, "keys"):
+                d[k] = v
+            elif isinstance(v, Mapping) or hasattr(v, "keys"):
+                d[k] = update(dv, deepcopy(v))
+            else:
+                d[k] = v
     return d
+
+
+def eq_mappable(map1, map2):
+    if isinstance(map1, Mapping) and isinstance(map2, Mapping):
+        if len(map1) != len(map2):
+            return False
+        for key in map1:
+            if key not in map2:
+                return False
+            if isinstance(map1[key], Mapping) and isinstance(map2[key], Mapping):
+                if not eq_mappable(map1[key], map2[key]):
+                    return False
+            if map1[key] != map2[key]:
+                return False
+        return True
+    return map1 == map2
 
 
 def join(loader, _, node):
     seq = loader.construct_sequence(node)
     return ''.join([str(i) for i in seq])
+
+
+def pretty_print(data):
+    print(yaml.dump(data, default_flow_style=False, default_style=''))
 
 
 class ConfigMngLoader(Loader):
