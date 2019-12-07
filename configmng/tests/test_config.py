@@ -57,6 +57,22 @@ def test_merging():
     merged_config = config1 + config3
     assert(len(merged_config.schemas) == 2)
 
+def test_change_propagation():
+
+    # Checking merging of schema files
+    config1 = Config({"level1": {"level2a": "value1a"}})
+    config2 = Config({"level1": {"level2b": "value1b"}})
+    merged_config = config1 + config2
+    merged_config["level1"]["level2b"] = "test"
+    assert(merged_config["level1"]["level2b"] == "test")
+    assert(config2["level1"]["level2b"] == "value1b")
+    assert("level2b" not in config1["level1"])
+
+    merged_config.set_value_at_path("test2", "level2b", ["level1"])
+    assert(merged_config["level1"]["level2b"] == "test2")
+    assert(config2["level1"]["level2b"] == "test2")
+    assert("level2b" not in config1["level1"])
+
 
 def test_to_json():
     path = Path(__file__).parent/ "test_artifacts" / "test_config.yaml"

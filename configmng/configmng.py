@@ -57,21 +57,19 @@ class ConfigMng:
                  user_configs: typing.Optional[ConfigArg] = None,
                  project_configs: typing.Optional[ConfigArg] = None,
                  application_configs: typing.Optional[ConfigArg] = None,
-                 #merged_schemas: typing.Optional[list] = None,
                  interactive: bool = True):
         """
         :param instance_configs: Configuration files for the 'instance' level.
         :param user_configs: Configuration for the 'user' level.
         :param project_configs: Configuration for the 'project' level.
         :param application_configs: Configuration for the 'application' level.
-        :param merged_schemas: Schemas that will be used for the validation of the merged configuration.
         :param interactive: If true, validation errors will prompt users for information to correct
                             the error or the missing fields. If false, validation errors raises exceptions.
         """
         self.interactive = interactive
 
         self._levels: typing.Mapping[str, ConfigLevel] = OrderedDict([
-            ("application", ConfigLevel("application", interactive=False)),
+            ("application", ConfigLevel("application", interactive=False, read_only=True)),
             ("project", ConfigLevel("project", interactive=self.interactive)),
             ("user", ConfigLevel("user", interactive=self.interactive)),
             ("instance", ConfigLevel("instance", interactive=self.interactive))])

@@ -8,11 +8,12 @@ from .schema import Schema, SchemaArg
 
 class ConfigLevel:
 
-    def __init__(self, name, configs=(), interactive=False):
+    def __init__(self, name, configs=(), interactive=False, read_only=False):
         self.name = name
         self._configs = OrderedDict()
         self._level_schemas = []
         self.interactive = interactive
+        self.read_only = read_only
 
         if isinstance(configs, OrderedDict):
             for config_name, config in configs.items():
@@ -51,10 +52,15 @@ class ConfigLevel:
                    config: ConfigArg,
                    name: typing.Optional[str] = None,
                    insertion_node: typing.Optional[typing.Iterable] = None,
-                   schemas: SchemaArg = None):
+                   schemas: SchemaArg = None,
+                   read_only: typing.Optional[bool] = None):
+
+        if read_only is None:
+            read_only = self.read_only
 
         if not isinstance(config, Config):
-            config = Config(config=config, schemas=schemas, insertion_node=insertion_node)
+            config = Config(config=config, schemas=schemas,
+                            insertion_node=insertion_node, read_only=read_only)
 
         if name is None:
             no = len(self._configs)
@@ -95,6 +101,11 @@ class ConfigLevel:
 
     @property
     def config(self):
+        if len(self._configs) == 0:
+            return Config(delete_tmp_files=True)
+        if len(self._configs) == 1:
+            return list(self._configs.values())[0]
+
         return_config = Config(delete_tmp_files=True)
         for config in self._configs.values():
             return_config = return_config + config

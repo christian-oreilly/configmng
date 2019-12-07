@@ -18,7 +18,7 @@ except ImportError:
 
 from .schema import Schema
 from .utils import ConfigMngLoader, update, get_node
-#from .provenance import ConfigProv
+from .provenance import ConfigProv
 
 
 def check_regex_key(map, key):
@@ -55,7 +55,7 @@ def get_schema_key_type(schema, key, path):
 class Config(MutableMapping):
 
     def __init__(self, config=None, schemas=None, temp_dir_node=("paths", "log_dir"),
-                 delete_tmp_files=False, insertion_node=None):
+                 delete_tmp_files=False, insertion_node=None, read_only=False):
         self.store: dict = dict()
         self.temp_dir_node = temp_dir_node
         self.delete_tmp_files = delete_tmp_files
@@ -63,7 +63,8 @@ class Config(MutableMapping):
         self._tmp_file = None
         self._schemas: List[Schema] = []
         self._insertion_node = ()
-        self._provenance = Provenance()
+        self._provenance = ConfigProv()
+        self.read_only = read_only
 
         if schemas is not None:
             self.set_schemas(schemas)
@@ -83,10 +84,15 @@ class Config(MutableMapping):
         self.store = merged_config.store
         self._schemas = merged_config.schemas
         self._insertion_node = merged_config._insertion_node
+        self._provenance = merged_config.provenance
         return self
 
     def __add__(self, other):
         return self._merge_configs_([self, other])
+
+    @property
+    def provenance(self):
+        return self._provenance
 
     @property
     def insertion_node(self):
@@ -117,6 +123,7 @@ class Config(MutableMapping):
             else:
                 update(store, config.store.copy())
             return_config.add_schemas(config.schemas)
+        return_config.provenance.merging(configs)
         return return_config
 
     def add_schemas(self, schemas):
@@ -157,6 +164,8 @@ class Config(MutableMapping):
             self._tmp_file = config._tmp_file
             self._schemas = config.schemas
             self._insertion_node = config._insertion_node
+            self._provenance = config.provenance
+            self.read_only = config.read_only
 
         elif isinstance(config, dict):
             self.path = None
@@ -266,8 +275,22 @@ class Config(MutableMapping):
                         print(f.read())
                 raise
 
-    def set_value_at_path(self, value, key, path):
-        get_node(self.store, path.split("/")[1:])[key] = value
+    def set_value_at_path(self, value, key, path, silent_fail=False, only_if_key_in=False):
+        self.provenance.propagate_changes(value, key, path)
+        try:
+            store = get_node(self.store, path)
+            if only_if_key_in:
+                if key in store:
+                    store[key] = value
+                else:
+                    if not silent_fail:
+                        raise KeyError
+            else:
+                store[key] = value
+        except KeyError:
+            if silent_fail:
+                return
+            raise
 
     def manage_error(self, core, error: SchemaError.SchemaErrorEntry):
 
@@ -278,7 +301,7 @@ class Config(MutableMapping):
                 value = input("The key {} at path {} of the ".format(error.key, error.path) +
                               "configuration file {} is missing.".format(self.path) +
                               " Please provide a value.")
-            self.set_value_at_path(value, error.key, error.path)
+            self.set_value_at_path(value, error.key, error.path.split("/")[1:])
 
         elif "does not match pattern" in error.msg:
             value = input("The value {} for the configuration key {}".format(error.value, error.path) +
@@ -286,7 +309,7 @@ class Config(MutableMapping):
                           " required by the schema. Please provide a compatible value.")
             key = error.path.split("/")[-1]
             path = "/".join(error.path.split("/")[:-1])
-            self.set_value_at_path(value, key, path)
+            self.set_value_at_path(value, key, error.path.split("/")[1:])
 
         elif "is not of type" in error.msg:
             value = input("The type for value {} for the configuration key {}".format(error.value, error.path) +
@@ -295,7 +318,7 @@ class Config(MutableMapping):
 
             key = error.path.split("/")[-1]
             path = "/".join(error.path.split("/")[:-1])
-            self.set_value_at_path(value, key, path)
+            self.set_value_at_path(value, key, error.path.split("/")[1:])
         else:
             raise
         self.save()
@@ -356,7 +379,11 @@ class Config(MutableMapping):
             self.validate()
 
     def save(self, path=None):
-        if path is not None:
+        if path is None:
+            if self.read_only:
+                raise PermissionError("This configuration is in read-only mode. To save it, "
+                                      "provide a path where to save a copy.")
+        else:
             self.path = path
 
         with self.path.open("w") as stream:
